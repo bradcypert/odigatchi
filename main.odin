@@ -6,6 +6,7 @@ import "vendor:sdl2/mixer"
 import "vendor:sdl2/ttf"
 import "core:math"
 import "core:c"
+import "core:os"
 
 WINDOW_WIDTH :: 320
 WINDOW_HEIGHT :: 400
@@ -41,6 +42,9 @@ Pet :: struct {
     state: State,
     anim_timer: f32,
     action_cooldown: f32,
+    hunger_deplete_timer: f32,
+    happiness_deplete_timer: f32,
+    energy_restore_timer: f32,
 }
 
 Button :: struct {
@@ -63,9 +67,11 @@ App :: struct {
     font: ^ttf.Font,
     running: bool,
     dragging: bool,
-    drag_offset_x: i32,
-    drag_offset_y: i32,
+    drag_start_x: i32,
+    drag_start_y: i32,
     show_context_menu: bool,
+    menu_x: i32,
+    menu_y: i32,
     menu_items: []ContextMenuItem,
     buttons: [3]Button,
     pet: Pet,
@@ -76,7 +82,20 @@ init_app :: proc() -> ^App {
     app := new(App)
     app.running = true
     app.show_context_menu = false
-    app.pet = Pet{hunger = 80, happiness = 80, energy = 80, state = .Idle, anim_timer = 0, action_cooldown = 0}
+    app.dragging = false
+    app.menu_x = 0
+    app.menu_y = 0
+    app.pet = Pet{
+        hunger = 80, 
+        happiness = 80, 
+        energy = 80, 
+        state = .Idle, 
+        anim_timer = 0, 
+        action_cooldown = 0,
+        hunger_deplete_timer = 0,
+        happiness_deplete_timer = 0,
+        energy_restore_timer = 0,
+    }
     app.time = 0
 
     if sdl2.Init(sdl2.INIT_VIDEO | sdl2.INIT_AUDIO) != 0 {
@@ -106,23 +125,36 @@ init_app :: proc() -> ^App {
 
     sdl2.SetRenderDrawBlendMode(app.renderer, sdl2.BlendMode.BLEND)
 
-    app.font = ttf.OpenFont("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 14)
+    font_paths := []cstring{
+        "/usr/share/fonts/Adwaita/AdwaitaSans-Regular.ttf",
+        "/usr/share/fonts/TTF/Hack-Regular.ttf",
+        "/usr/share/fonts/noto/NotoSans-Regular.ttf",
+    }
+    
+    for path in font_paths {
+        app.font = ttf.OpenFont(path, 14)
+        if app.font != nil {
+            break
+        }
+    }
+    
     if app.font == nil {
         app.font = ttf.OpenFont("/System/Library/Fonts/Helvetica.ttc", 14)
     }
+    
+    if app.font == nil {
+        app.font = ttf.OpenFont("/System/Library/Fonts/SF Pro Display.ttc", 14)
+    }
 
     app.buttons = [3]Button{
-        Button{x = 20, y = 330, width = 80, height = 36, text = "Feed", hovered = false},
-        Button{x = 120, y = 330, width = 80, height = 36, text = "Play", hovered = false},
-        Button{x = 220, y = 330, width = 80, height = 36, text = "Talk", hovered = false},
+        Button{x = 20, y = 350, width = 80, height = 36, text = "Feed", hovered = false},
+        Button{x = 120, y = 350, width = 80, height = 36, text = "Play", hovered = false},
+        Button{x = 220, y = 350, width = 80, height = 36, text = "Talk", hovered = false},
     }
 
     app.menu_items = []ContextMenuItem{
-        ContextMenuItem{x = 50, y = 80, width = 120, height = 28, text = "Feed", hovered = false},
-        ContextMenuItem{x = 50, y = 110, width = 120, height = 28, text = "Play", hovered = false},
-        ContextMenuItem{x = 50, y = 140, width = 120, height = 28, text = "Talk", hovered = false},
-        ContextMenuItem{x = 50, y = 175, width = 120, height = 28, text = "About", hovered = false},
-        ContextMenuItem{x = 50, y = 210, width = 120, height = 28, text = "Close", hovered = false},
+        ContextMenuItem{x = 50, y = 80, width = 120, height = 28, text = "About", hovered = false},
+        ContextMenuItem{x = 50, y = 115, width = 120, height = 28, text = "Close", hovered = false},
     }
 
     return app
@@ -172,9 +204,24 @@ update_pet :: proc(app: ^App, dt: f32) {
         }
     }
 
-    app.pet.hunger = max(0, app.pet.hunger - 1)
-    app.pet.happiness = max(0, app.pet.happiness - 1)
-    app.pet.energy = min(100, app.pet.energy + 1)
+    app.pet.hunger_deplete_timer += dt
+    app.pet.happiness_deplete_timer += dt
+    app.pet.energy_restore_timer += dt
+
+    if app.pet.hunger_deplete_timer >= 5.0 {
+        app.pet.hunger = max(0, app.pet.hunger - 1)
+        app.pet.hunger_deplete_timer = 0
+    }
+
+    if app.pet.happiness_deplete_timer >= 6.0 {
+        app.pet.happiness = max(0, app.pet.happiness - 1)
+        app.pet.happiness_deplete_timer = 0
+    }
+
+    if app.pet.energy_restore_timer >= 3.0 {
+        app.pet.energy = min(100, app.pet.energy + 1)
+        app.pet.energy_restore_timer = 0
+    }
 }
 
 render :: proc(app: ^App) {
@@ -201,59 +248,40 @@ render_window_background :: proc(app: ^App) {
     sdl2.RenderFillRect(app.renderer, &rect)
 }
 
+render_text :: proc(app: ^App, text: cstring, x, y: i32) {
+    if app.font == nil {
+        return
+    }
+    
+    surface := ttf.RenderText_Solid(app.font, text, get_text_color())
+    if surface == nil {
+        return
+    }
+    
+    texture := sdl2.CreateTextureFromSurface(app.renderer, surface)
+    if texture == nil {
+        sdl2.FreeSurface(surface)
+        return
+    }
+    
+    sdl2.SetTextureBlendMode(texture, sdl2.BlendMode.BLEND)
+    
+    tex_w: i32 = 0
+    tex_h: i32 = 0
+    sdl2.QueryTexture(texture, nil, nil, &tex_w, &tex_h)
+    dst := sdl2.Rect{x, y, tex_w, tex_h}
+    sdl2.RenderCopy(app.renderer, texture, nil, &dst)
+    sdl2.DestroyTexture(texture)
+    sdl2.FreeSurface(surface)
+}
+
 render_title_bar :: proc(app: ^App) {
     rect := sdl2.Rect{0, 0, WINDOW_WIDTH, 40}
     col := get_secondary_color()
     sdl2.SetRenderDrawColor(app.renderer, col.r, col.g, col.b, 255)
     sdl2.RenderFillRect(app.renderer, &rect)
 
-    if app.font != nil {
-        surface := ttf.RenderText_Blended(app.font, "Odigatchi v1.0", get_text_color())
-        if surface != nil {
-            texture := sdl2.CreateTextureFromSurface(app.renderer, surface)
-            tex_w: i32 = 0
-            tex_h: i32 = 0
-            sdl2.QueryTexture(texture, nil, nil, &tex_w, &tex_h)
-            dst := sdl2.Rect{10, 10, tex_w, tex_h}
-            sdl2.RenderCopy(app.renderer, texture, nil, &dst)
-            sdl2.DestroyTexture(texture)
-            sdl2.FreeSurface(surface)
-        }
-    }
-
-    close_rect := sdl2.Rect{WINDOW_WIDTH - 30, 8, 22, 24}
-    mouse_x, mouse_y: i32
-    sdl2.GetMouseState(&mouse_x, &mouse_y)
-    
-    window_x, window_y: i32
-    sdl2.GetWindowPosition(app.window, &window_x, &window_y)
-    rel_x := mouse_x - window_x
-    rel_y := mouse_y - window_y
-    
-    in_close := rel_x >= close_rect.x && rel_x < close_rect.x + close_rect.w && 
-                rel_y >= close_rect.y && rel_y < close_rect.y + close_rect.h
-    
-    if in_close {
-        sdl2.SetRenderDrawColor(app.renderer, 200, 50, 50, 255)
-    } else {
-        col = get_accent_color()
-        sdl2.SetRenderDrawColor(app.renderer, col.r, col.g, col.b, 255)
-    }
-    sdl2.RenderFillRect(app.renderer, &close_rect)
-
-    if app.font != nil {
-        surface := ttf.RenderText_Blended(app.font, "X", get_text_color())
-        if surface != nil {
-            texture := sdl2.CreateTextureFromSurface(app.renderer, surface)
-            tex_w: i32 = 0
-            tex_h: i32 = 0
-            sdl2.QueryTexture(texture, nil, nil, &tex_w, &tex_h)
-            dst := sdl2.Rect{close_rect.x + 6, close_rect.y + 4, tex_w, tex_h}
-            sdl2.RenderCopy(app.renderer, texture, nil, &dst)
-            sdl2.DestroyTexture(texture)
-            sdl2.FreeSurface(surface)
-        }
-    }
+    render_text(app, "Odigatchi v1.0", 10, 10)
 }
 
 render_pet :: proc(app: ^App) {
@@ -351,17 +379,8 @@ render_status_bars :: proc(app: ^App) {
     bar_width: i32 = 200
     bar_height: i32 = 16
 
-    if app.font != nil {
-        label := ttf.RenderText_Blended(app.font, "Hunger", get_text_color())
-        if label != nil {
-            texture := sdl2.CreateTextureFromSurface(app.renderer, label)
-            dst := sdl2.Rect{20, bar_y, 50, 14}
-            sdl2.RenderCopy(app.renderer, texture, nil, &dst)
-            sdl2.DestroyTexture(texture)
-            sdl2.FreeSurface(label)
-        }
-    }
-
+    render_text(app, "Hunger", 20, bar_y)
+    
     bg_color := sdl2.Color{50, 50, 50, 255}
     bg_rect := sdl2.Rect{75, bar_y, bar_width, bar_height}
     sdl2.SetRenderDrawColor(app.renderer, bg_color.r, bg_color.g, bg_color.b, bg_color.a)
@@ -377,16 +396,7 @@ render_status_bars :: proc(app: ^App) {
 
     bar_y += 25
 
-    if app.font != nil {
-        label := ttf.RenderText_Blended(app.font, "Happy", get_text_color())
-        if label != nil {
-            texture := sdl2.CreateTextureFromSurface(app.renderer, label)
-            dst := sdl2.Rect{20, bar_y, 50, 14}
-            sdl2.RenderCopy(app.renderer, texture, nil, &dst)
-            sdl2.DestroyTexture(texture)
-            sdl2.FreeSurface(label)
-        }
-    }
+    render_text(app, "Happy", 20, bar_y)
 
     bg_rect = sdl2.Rect{75, bar_y, bar_width, bar_height}
     sdl2.SetRenderDrawColor(app.renderer, bg_color.r, bg_color.g, bg_color.b, bg_color.a)
@@ -402,16 +412,7 @@ render_status_bars :: proc(app: ^App) {
 
     bar_y += 25
 
-    if app.font != nil {
-        label := ttf.RenderText_Blended(app.font, "Energy", get_text_color())
-        if label != nil {
-            texture := sdl2.CreateTextureFromSurface(app.renderer, label)
-            dst := sdl2.Rect{20, bar_y, 50, 14}
-            sdl2.RenderCopy(app.renderer, texture, nil, &dst)
-            sdl2.DestroyTexture(texture)
-            sdl2.FreeSurface(label)
-        }
-    }
+    render_text(app, "Energy", 20, bar_y)
 
     bg_rect = sdl2.Rect{75, bar_y, bar_width, bar_height}
     sdl2.SetRenderDrawColor(app.renderer, bg_color.r, bg_color.g, bg_color.b, bg_color.a)
@@ -457,34 +458,17 @@ render_buttons :: proc(app: ^App) {
         sdl2.SetRenderDrawColor(app.renderer, bg_color.r, bg_color.g, bg_color.b, 255)
         sdl2.RenderFillRect(app.renderer, &rect)
 
-        if app.font != nil {
-            surface := ttf.RenderText_Blended(app.font, btn.text, get_text_color())
-            if surface != nil {
-                texture := sdl2.CreateTextureFromSurface(app.renderer, surface)
-                tex_w: i32 = 0
-                tex_h: i32 = 0
-                sdl2.QueryTexture(texture, nil, nil, &tex_w, &tex_h)
-                dst := sdl2.Rect{i32(btn.x) + (i32(btn.width) - tex_w) / 2, 
-                                i32(btn.y) + (i32(btn.height) - tex_h) / 2, 
-                                tex_w, tex_h}
-                sdl2.RenderCopy(app.renderer, texture, nil, &dst)
-                sdl2.DestroyTexture(texture)
-                sdl2.FreeSurface(surface)
-            }
-        }
+        text_x := i32(btn.x) + (i32(btn.width) - 40) / 2
+        text_y := i32(btn.y) + (i32(btn.height) - 14) / 2
+        render_text(app, btn.text, text_x, text_y)
     }
 }
 
 render_context_menu :: proc(app: ^App) {
-    mouse_x, mouse_y: i32
-    sdl2.GetMouseState(&mouse_x, &mouse_y)
+    menu_width: i32 = 150
+    menu_height: i32 = 80
     
-    window_x, window_y: i32
-    sdl2.GetWindowPosition(app.window, &window_x, &window_y)
-    rel_x := mouse_x - window_x
-    rel_y := mouse_y - window_y
-
-    menu_bg := sdl2.Rect{40, 70, 150, 180}
+    menu_bg := sdl2.Rect{app.menu_x, app.menu_y, menu_width, menu_height}
     col := get_secondary_color()
     sdl2.SetRenderDrawColor(app.renderer, col.r, col.g, col.b, 255)
     sdl2.RenderFillRect(app.renderer, &menu_bg)
@@ -493,30 +477,17 @@ render_context_menu :: proc(app: ^App) {
     sdl2.SetRenderDrawColor(app.renderer, col.r, col.g, col.b, 255)
     sdl2.RenderDrawRect(app.renderer, &menu_bg)
 
-    for &item in app.menu_items {
-        item.hovered = rel_x >= i32(item.x) && rel_x < i32(item.x + item.width) &&
-                        rel_y >= i32(item.y) && rel_y < i32(item.y + item.height)
-
-        if item.hovered {
-            bg := sdl2.Rect{i32(item.x), i32(item.y), i32(item.width), i32(item.height)}
-            col = get_accent_color()
-            sdl2.SetRenderDrawColor(app.renderer, col.r, col.g, col.b, 150)
-            sdl2.RenderFillRect(app.renderer, &bg)
-        }
-
-        if app.font != nil {
-            surface := ttf.RenderText_Blended(app.font, item.text, get_text_color())
-            if surface != nil {
-                texture := sdl2.CreateTextureFromSurface(app.renderer, surface)
-                tex_w: i32 = 0
-                tex_h: i32 = 0
-                sdl2.QueryTexture(texture, nil, nil, &tex_w, &tex_h)
-                dst := sdl2.Rect{i32(item.x) + 10, i32(item.y) + 6, tex_w, tex_h}
-                sdl2.RenderCopy(app.renderer, texture, nil, &dst)
-                sdl2.DestroyTexture(texture)
-                sdl2.FreeSurface(surface)
-            }
-        }
+    for i := 0; i < len(app.menu_items); i += 1 {
+        y_pos := app.menu_y + i32(i) * 35
+        
+        text_x := app.menu_x + 15
+        text_y := y_pos + 5
+        
+        item_text: cstring = "Item"
+        if i == 0 do item_text = "About"
+        else if i == 1 do item_text = "Close"
+        
+        render_text(app, item_text, text_x, text_y)
     }
 }
 
@@ -526,26 +497,24 @@ handle_event :: proc(app: ^App, event: ^sdl2.Event) -> bool {
         app.running = false
         return true
 
-    case .MOUSEBUTTONDOWN:
+    case .MOUSEBUTTONDOWN: {
         mouse_x := event.button.x
         mouse_y := event.button.y
 
-        if event.button.button == sdl2.BUTTON_LEFT {
-            if mouse_y < 40 && mouse_x < WINDOW_WIDTH - 30 {
-                app.dragging = true
-                app.drag_offset_x = mouse_x
-                app.drag_offset_y = mouse_y
-                return true
-            }
+        win_x, win_y: i32
+        sdl2.GetWindowPosition(app.window, &win_x, &win_y)
+        rel_x := mouse_x - win_x
+        rel_y := mouse_y - win_y
 
-            if mouse_x >= WINDOW_WIDTH - 30 && mouse_x < WINDOW_WIDTH - 8 && mouse_y >= 8 && mouse_y < 32 {
-                app.running = false
+        if event.button.button == sdl2.BUTTON_LEFT {
+            if rel_y < 40 && rel_x < WINDOW_WIDTH {
+                app.dragging = true
                 return true
             }
 
             for &btn in app.buttons {
-                if mouse_x >= i32(btn.x) && mouse_x < i32(btn.x + btn.width) &&
-                   mouse_y >= i32(btn.y) && mouse_y < i32(btn.y + btn.height) {
+                if rel_x >= i32(btn.x) && rel_x < i32(btn.x + btn.width) &&
+                   rel_y >= i32(btn.y) && rel_y < i32(btn.y + btn.height) {
                     if app.pet.action_cooldown <= 0 {
                         if &btn == &app.buttons[0] {
                             feed_pet(app)
@@ -561,9 +530,19 @@ handle_event :: proc(app: ^App, event: ^sdl2.Event) -> bool {
         }
 
         if event.button.button == sdl2.BUTTON_RIGHT {
-            app.show_context_menu = !app.show_context_menu
+            app.show_context_menu = true
+            
+            app.menu_x = 10
+            app.menu_y = 50
+            
+            for i := 0; i < len(app.menu_items); i += 1 {
+                app.menu_items[i].x = f32(app.menu_x)
+                app.menu_items[i].y = f32(app.menu_y) + f32(i) * 35.0
+            }
+            
             return true
         }
+    }
 
     case .MOUSEBUTTONUP:
         if app.dragging {
@@ -571,51 +550,37 @@ handle_event :: proc(app: ^App, event: ^sdl2.Event) -> bool {
             return true
         }
 
-        if app.show_context_menu {
+        if app.show_context_menu && event.button.button == sdl2.BUTTON_LEFT {
             mouse_x := event.button.x
             mouse_y := event.button.y
-
-            menu_clicked := -1
-            for i := 0; i < len(app.menu_items); i += 1 {
-                item := app.menu_items[i]
-                if mouse_x >= i32(item.x) && mouse_x < i32(item.x + item.width) &&
-                   mouse_y >= i32(item.y) && mouse_y < i32(item.y + item.height) {
-                    menu_clicked = i
-                    break
-                }
+            
+            win_x, win_y: i32
+            sdl2.GetWindowPosition(app.window, &win_x, &win_y)
+            rel_x := mouse_x - win_x
+            rel_y := mouse_y - win_y
+            
+            clicked_y := rel_y - app.menu_y
+            item_index := clicked_y / 35
+            
+            if item_index == 0 && clicked_y >= 0 && clicked_y < 35 {
+                show_about(app)
+            } else if item_index == 1 && clicked_y >= 35 && clicked_y < 70 {
+                app.running = false
             }
-
-            if menu_clicked >= 0 {
-                switch menu_clicked {
-                case 0:
-                    feed_pet(app)
-                case 1:
-                    play_pet(app)
-                case 2:
-                    talk_pet(app)
-                case 3:
-                    show_about(app)
-                case 4:
-                    app.running = false
-                }
-                return true
-            }
-
-            menu_bounds := sdl2.Rect{40, 70, 150, 180}
-            if !(mouse_x >= menu_bounds.x && mouse_x < menu_bounds.x + menu_bounds.w &&
-                 mouse_y >= menu_bounds.y && mouse_y < menu_bounds.y + menu_bounds.h) {
-                app.show_context_menu = false
-            }
+            app.show_context_menu = false
+            return true
         }
 
     case .MOUSEMOTION:
         if app.dragging {
-            x := event.motion.x - app.drag_offset_x
-            y := event.motion.y - app.drag_offset_y
+            x := event.motion.xrel
+            y := event.motion.yrel
             
             win_x, win_y: i32
             sdl2.GetWindowPosition(app.window, &win_x, &win_y)
-            sdl2.SetWindowPosition(app.window, win_x + x, win_y + y)
+            new_x := win_x + x
+            new_y := win_y + y
+            sdl2.SetWindowPosition(app.window, new_x, new_y)
             return true
         }
     }
