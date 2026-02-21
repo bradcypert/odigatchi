@@ -197,8 +197,9 @@ update_pet :: proc(app: ^App, dt: f32) {
         app.pet.state = .Idle
     }
 
+    app.pet.anim_timer += dt
+    
     if app.pet.state == .Idle {
-        app.pet.anim_timer += dt
         if app.pet.hunger < 30 || app.pet.happiness < 30 {
             app.pet.state = .Sad
         }
