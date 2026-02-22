@@ -7,6 +7,7 @@ import "vendor:sdl2/ttf"
 import "core:math"
 import "core:c"
 import "core:os"
+import "core:fmt"
 
 WINDOW_WIDTH :: 320
 WINDOW_HEIGHT :: 400
@@ -26,6 +27,13 @@ get_text_color :: proc() -> sdl2.Color { return sdl2.Color{234, 234, 234, 255} }
 get_button_hover_color :: proc() -> sdl2.Color { return sdl2.Color{255, 107, 107, 255} }
 get_success_color :: proc() -> sdl2.Color { return sdl2.Color{74, 222, 128, 255} }
 get_warning_color :: proc() -> sdl2.Color { return sdl2.Color{251, 191, 36, 255} }
+
+hit_test :: proc "c" (win: ^sdl2.Window, area: ^sdl2.Point, data: rawptr) -> sdl2.HitTestResult {
+    if area.y < 40 {
+        return .DRAGGABLE
+    }
+    return .NORMAL
+}
 
 State :: enum {
     Idle,
@@ -67,8 +75,8 @@ App :: struct {
     font: ^ttf.Font,
     running: bool,
     dragging: bool,
-    drag_start_x: i32,
-    drag_start_y: i32,
+    drag_offset_x: i32,
+    drag_offset_y: i32,
     show_context_menu: bool,
     menu_x: i32,
     menu_y: i32,
@@ -83,6 +91,8 @@ init_app :: proc() -> ^App {
     app.running = true
     app.show_context_menu = false
     app.dragging = false
+    app.drag_offset_x = 0
+    app.drag_offset_y = 0
     app.menu_x = 0
     app.menu_y = 0
     app.pet = Pet{
@@ -102,6 +112,8 @@ init_app :: proc() -> ^App {
         return nil
     }
 
+    sdl2.SetHint("SDL_HINT_WINDOW_FRAME_USABLE_WHILE_BORDERLESS", "1")
+
     if ttf.Init() != 0 {
         return nil
     }
@@ -117,6 +129,8 @@ init_app :: proc() -> ^App {
     if app.window == nil {
         return nil
     }
+
+    sdl2.SetWindowHitTest(app.window, hit_test, nil)
 
     app.renderer = sdl2.CreateRenderer(app.window, -1, get_renderer_flags())
     if app.renderer == nil {
@@ -499,16 +513,16 @@ handle_event :: proc(app: ^App, event: ^sdl2.Event) -> bool {
         return true
 
     case .MOUSEBUTTONDOWN: {
-        mouse_x := event.button.x
-        mouse_y := event.button.y
+        if event.button.button == 1 {
+            rel_x := event.button.x
+            rel_y := event.button.y
 
-        win_x, win_y: i32
-        sdl2.GetWindowPosition(app.window, &win_x, &win_y)
-        rel_x := mouse_x - win_x
-        rel_y := mouse_y - win_y
-
-        if event.button.button == sdl2.BUTTON_LEFT {
-            if rel_y < 40 && rel_x < WINDOW_WIDTH {
+            if rel_y < 40 {
+                mouse_x, mouse_y: i32
+                sdl2.GetGlobalMouseState(&mouse_x, &mouse_y)
+                app.drag_offset_x = mouse_x
+                app.drag_offset_y = mouse_y
+                sdl2.CaptureMouse(true)
                 app.dragging = true
                 return true
             }
@@ -547,20 +561,16 @@ handle_event :: proc(app: ^App, event: ^sdl2.Event) -> bool {
 
     case .MOUSEBUTTONUP:
         if app.dragging {
+            sdl2.CaptureMouse(false)
             app.dragging = false
             return true
         }
 
-        if app.show_context_menu && event.button.button == sdl2.BUTTON_LEFT {
+        if app.show_context_menu && event.button.button == 1 {
             mouse_x := event.button.x
             mouse_y := event.button.y
             
-            win_x, win_y: i32
-            sdl2.GetWindowPosition(app.window, &win_x, &win_y)
-            rel_x := mouse_x - win_x
-            rel_y := mouse_y - win_y
-            
-            clicked_y := rel_y - app.menu_y
+            clicked_y := mouse_y - app.menu_y
             item_index := clicked_y / 35
             
             if item_index == 0 && clicked_y >= 0 && clicked_y < 35 {
@@ -574,14 +584,18 @@ handle_event :: proc(app: ^App, event: ^sdl2.Event) -> bool {
 
     case .MOUSEMOTION:
         if app.dragging {
-            x := event.motion.xrel
-            y := event.motion.yrel
+            mouse_x, mouse_y: i32
+            sdl2.GetGlobalMouseState(&mouse_x, &mouse_y)
+            
+            dx := mouse_x - app.drag_offset_x
+            dy := mouse_y - app.drag_offset_y
             
             win_x, win_y: i32
             sdl2.GetWindowPosition(app.window, &win_x, &win_y)
-            new_x := win_x + x
-            new_y := win_y + y
-            sdl2.SetWindowPosition(app.window, new_x, new_y)
+            sdl2.SetWindowPosition(app.window, win_x + dx, win_y + dy)
+            
+            app.drag_offset_x = mouse_x
+            app.drag_offset_y = mouse_y
             return true
         }
     }
